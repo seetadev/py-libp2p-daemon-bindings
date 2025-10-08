@@ -1,6 +1,7 @@
 """
-The classes in this file allow to launch the JS or Go daemon as a subprocess. This provides a simple system
-for application maintainers to write tests using one or more instances of the P2P daemon.
+The classes in this file allow to launch the JS or Go daemon as a subprocess.
+This provides a simple system for application maintainers to write tests
+using one or more instances of the P2P daemon.
 """
 
 # Used for the annotation of Popen, which is not generic before Python 3.9
@@ -9,9 +10,19 @@ from __future__ import annotations
 import abc
 import os
 import subprocess
+import tempfile
 import time
 import uuid
-from typing import AsyncIterator, Awaitable, Callable, List, NamedTuple, Tuple
+from typing import (
+    AsyncIterator,
+    Awaitable,
+    BinaryIO,
+    Callable,
+    List,
+    NamedTuple,
+    Optional,
+    Tuple,
+)
 
 import anyio
 from async_generator import asynccontextmanager
@@ -19,9 +30,8 @@ from multiaddr import Multiaddr, protocols
 
 from p2pclient.p2pclient import Client
 from p2pclient.utils import get_unused_tcp_port
-from typing import BinaryIO, Optional
 
-TIMEOUT_DURATION = 30  # seconds
+TIMEOUT_DURATION = 120  # seconds - increased for Windows and bootstrap connectivity
 
 
 async def try_until_success(
@@ -54,13 +64,15 @@ class Daemon(abc.ABC):
         self,
         daemon_executable: str,
         control_maddr: Multiaddr,
-        enable_control: bool,
-        enable_connmgr: bool,
-        enable_dht: bool,
-        enable_pubsub: bool,
+        peer_maddr: Optional[Multiaddr] = None,
+        enable_control: bool = True,
+        enable_connmgr: bool = False,
+        enable_dht: bool = False,
+        enable_pubsub: bool = False,
     ):
         self.daemon_executable = daemon_executable
         self.control_maddr = control_maddr
+        self.peer_maddr = peer_maddr
         self.enable_control = enable_control
         self.enable_connmgr = enable_connmgr
         self.enable_dht = enable_dht
@@ -71,15 +83,18 @@ class Daemon(abc.ABC):
 
     def _start_logging(self) -> None:
         name_control_maddr = str(self.control_maddr).replace("/", "_").replace(".", "_")
-        self.log_filename = f"/tmp/log_p2pd{name_control_maddr}.txt"
+        temp_dir = tempfile.gettempdir()
+        self.log_filename = os.path.join(temp_dir, f"log_p2pd{name_control_maddr}.txt")
         self.f_log = open(self.log_filename, "wb")
 
     @abc.abstractmethod
     def _make_command_line_options(self) -> List[str]:
+        """Return the command line options to launch the daemon."""
         ...
 
     @abc.abstractmethod
     def _terminate(self) -> None:
+        """Terminate the daemon."""
         ...
 
     def _run(self, daemon_executable: str) -> None:
@@ -110,7 +125,8 @@ class Daemon(abc.ABC):
             return
         self._terminate()
         self.proc_daemon.wait()
-        self.f_log.close()
+        if self.f_log:
+            self.f_log.close()
         self.is_closed = True
 
 
@@ -120,10 +136,13 @@ class GoDaemon(Daemon):
 
     def _make_command_line_options(self) -> List[str]:
         cmd_list = [f"-listen={str(self.control_maddr)}"]
+        if self.peer_maddr is not None:
+            cmd_list.append(f"-hostAddrs={str(self.peer_maddr)}")
         if self.enable_connmgr:
             cmd_list += ["-connManager=true", "-connLo=1", "-connHi=2", "-connGrace=0"]
         if self.enable_dht:
-            cmd_list += ["-dht=true"]
+            # Enable DHT with bootstrap for better connectivity
+            cmd_list += ["-dht=true", "-b"]
         if self.enable_pubsub:
             cmd_list += ["-pubsub=true", "-pubsubRouter=gossipsub"]
 
@@ -139,6 +158,8 @@ class JsDaemon(Daemon):
 
     def _make_command_line_options(self) -> List[str]:
         cmd_list = [f"--listen={str(self.control_maddr)}"]
+        if self.peer_maddr is not None:
+            cmd_list.append(f"--hostAddrs={str(self.peer_maddr)}")
         if self.enable_connmgr:
             cmd_list += [
                 "--connManager=true",
@@ -153,8 +174,9 @@ class JsDaemon(Daemon):
 
         return cmd_list
 
-    # TODO: investigate why the JS daemon needs to be killed instead of terminating gracefully. Some tests
-    #       (ex: test_client_stream_open_failure) freeze after completion if we use terminate.
+    # TODO: investigate why the JS daemon needs to be killed instead of terminating gracefully.
+    # Some tests
+    #  (ex: test_client_stream_open_failure) freeze after completion if we use terminate.
     def _terminate(self) -> None:
         self.proc_daemon.kill()
 
@@ -175,6 +197,8 @@ async def make_p2pd_pair_unix(
     name = str(uuid.uuid4())[:8]
     control_maddr = Multiaddr(f"/unix/tmp/test_p2pd_control_{name}.sock")
     listen_maddr = Multiaddr(f"/unix/tmp/test_p2pd_listen_{name}.sock")
+    # Use IP4 for peer connections even with Unix control sockets
+    peer_maddr = Multiaddr(f"/ip4/127.0.0.1/tcp/{get_unused_tcp_port()}")
     # Remove the existing unix socket files if they are existing
     try:
         os.unlink(control_maddr.value_for_protocol(protocols.P_UNIX))
@@ -188,6 +212,7 @@ async def make_p2pd_pair_unix(
         daemon_executable=daemon_executable,
         control_maddr=control_maddr,
         listen_maddr=listen_maddr,
+        peer_maddr=peer_maddr,
         enable_control=enable_control,
         enable_connmgr=enable_connmgr,
         enable_dht=enable_dht,
@@ -206,10 +231,12 @@ async def make_p2pd_pair_ip4(
 ) -> AsyncIterator[DaemonTuple]:
     control_maddr = Multiaddr(f"/ip4/127.0.0.1/tcp/{get_unused_tcp_port()}")
     listen_maddr = Multiaddr(f"/ip4/127.0.0.1/tcp/{get_unused_tcp_port()}")
+    peer_maddr = Multiaddr(f"/ip4/127.0.0.1/tcp/{get_unused_tcp_port()}")
     async with make_p2pd_pair(
         daemon_executable=daemon_executable,
         control_maddr=control_maddr,
         listen_maddr=listen_maddr,
+        peer_maddr=peer_maddr,
         enable_control=enable_control,
         enable_connmgr=enable_connmgr,
         enable_dht=enable_dht,
@@ -223,6 +250,7 @@ async def make_p2pd_pair(
     daemon_executable: str,
     control_maddr: Multiaddr,
     listen_maddr: Multiaddr,
+    peer_maddr: Multiaddr,
     enable_control: bool,
     enable_connmgr: bool,
     enable_dht: bool,
@@ -232,6 +260,7 @@ async def make_p2pd_pair(
     p2pd = daemon_cls(
         daemon_executable=daemon_executable,
         control_maddr=control_maddr,
+        peer_maddr=peer_maddr,
         enable_control=enable_control,
         enable_connmgr=enable_connmgr,
         enable_dht=enable_dht,

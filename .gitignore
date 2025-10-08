@@ -2,6 +2,9 @@
 __pycache__/
 *.py[cod]
 *$py.class
+.vscode/
+go-libp2p-daemon/
+errors.txt
 
 # C extensions
 *.so

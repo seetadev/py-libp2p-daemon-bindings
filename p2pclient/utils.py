@@ -1,12 +1,24 @@
-from contextlib import closing
+import logging
 import socket
+from contextlib import closing
 
 import anyio
+from anyio.abc import ByteStream
 from google.protobuf.message import Message as PBMessage
 
 from .exceptions import ControlFailure
 from .pb import p2pd_pb2 as p2pd_pb
-from .serialization import read_unsigned_varint, write_unsigned_varint
+from .serialization import (
+    _recv_exactly,
+    read_unsigned_varint,
+    write_unsigned_varint,
+)
+
+# Type alias for compatibility
+SocketStream = ByteStream
+
+logger = logging.getLogger(__name__)
+logger.setLevel(logging.DEBUG)
 
 
 def raise_if_failed(response: p2pd_pb.Response) -> None:
@@ -14,16 +26,29 @@ def raise_if_failed(response: p2pd_pb.Response) -> None:
         raise ControlFailure(f"connect failed. msg={response.error.msg}")
 
 
-async def write_pbmsg(stream: anyio.abc.SocketStream, pbmsg: PBMessage) -> None:
+async def write_pbmsg(stream: SocketStream, pbmsg: PBMessage) -> None:
     size = pbmsg.ByteSize()
     await write_unsigned_varint(stream, size)
     msg_bytes: bytes = pbmsg.SerializeToString()
     await stream.send(msg_bytes)
+    if logger.isEnabledFor(logging.DEBUG):
+        logger.debug("write_pbmsg (%d bytes): %s", size, msg_bytes.hex())
 
 
-async def read_pbmsg_safe(stream: anyio.abc.SocketStream, pbmsg: PBMessage) -> None:
-    len_msg_bytes = await read_unsigned_varint(stream)
-    msg_bytes = await stream.receive_exactly(len_msg_bytes)
+async def read_pbmsg_safe(stream: SocketStream, pbmsg: PBMessage) -> None:
+    # Length prefix
+    # length = await read_unsigned_varint(stream)
+    # msg_bytes = await _recv_exactly(stream, length)
+
+    with anyio.fail_after(60):
+        length = await read_unsigned_varint(stream)
+
+    with anyio.fail_after(60):
+        msg_bytes = await _recv_exactly(stream, length)
+
+    if logger.isEnabledFor(logging.DEBUG):
+        logger.debug("read_pbmsg (%d bytes): %s", length, msg_bytes.hex())
+
     pbmsg.ParseFromString(msg_bytes)
 
 

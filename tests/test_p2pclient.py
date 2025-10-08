@@ -1,20 +1,25 @@
 import io
 
 import anyio
+import pytest
+from anyio.abc import SocketAttribute
 from google.protobuf.message import EncodeError
 from multiaddr import Multiaddr, protocols
-import pytest
 
+import p2pclient.pb.p2pd_pb2 as p2pd_pb
 from p2pclient import config
 from p2pclient.control import parse_conn_protocol
 from p2pclient.p2pclient import ControlClient, DaemonConnector
-import p2pclient.pb.p2pd_pb2 as p2pd_pb
 from p2pclient.serialization import write_unsigned_varint
 from p2pclient.utils import read_pbmsg_safe, write_pbmsg
 
 
 class MockReaderWriter(io.BytesIO):
     async def receive_exactly(self, n):
+        await anyio.sleep(0)
+        return self.read(n)
+
+    async def receive(self, n=4096):
         await anyio.sleep(0)
         return self.read(n)
 
@@ -93,34 +98,44 @@ async def test_read_pbmsg_safe_valid(msg_bytes):
 @pytest.mark.anyio
 async def test_read_pbmsg_safe_readexactly_fails():
     host = "127.0.0.1"
-    port = 5566
+    # port = 5566
+    # port = 5567
+    # port = 3000
+    event = anyio.Event()
 
-    event = anyio.create_event()
+    async def handler_stream(stream):
+        pb_msg = p2pd_pb.Response()
+        try:
+            await read_pbmsg_safe(stream, pb_msg)
+        except anyio.IncompleteRead:
+            event.set()
+            return
 
-    async with anyio.create_task_group() as tg, await anyio.create_tcp_listener(
-        local_host=host, local_port = port
-    ) as listener:
+    # listener = await anyio.create_tcp_listener(local_host=host, local_port=port)
+    listener = await anyio.create_tcp_listener(local_host=host, local_port=0)
+    # addr = listener.listeners[0].extra(SocketAttribute.local_address)
+    # port = addr[1]
+    host, port, *_ = listener.listeners[0].extra(SocketAttribute.local_address)
 
-        async def handler_stream(stream):
-            pb_msg = p2pd_pb.Response()
-            try:
-                await read_pbmsg_safe(stream, pb_msg)
-            except anyio.exceptions.IncompleteRead:
-                await event.set()
+    async with anyio.create_task_group() as tg:
+        # spin up server
+        tg.start_soon(listener.serve, handler_stream)
 
-        async def server_serve():
-            async with listener:
-                async for client in listener:
-                    await tg.start_task(handler_stream, client)
+        # Give the server a moment to start
+        await anyio.sleep(0.1)
 
-        await tg.start_task(server_serve)
-
+        # connect and immediately close to trigger IncompleteRead on the server
         stream = await anyio.connect_tcp(host, port)
-        # close the stream. Therefore the handler should receive EOF, and then `readexactly` raises.
-        await stream.close()
+        await stream.aclose()
 
-        async with anyio.fail_after(5):
+        with anyio.fail_after(5):
             await event.wait()
+
+        # Cancel the server task to allow clean shutdown
+        tg.cancel_scope.cancel()
+
+    await listener.aclose()
+
 
 @pytest.mark.parametrize(
     "pb_msg, msg_bytes",

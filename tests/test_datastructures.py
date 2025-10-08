@@ -1,9 +1,9 @@
-from p2pclient.libp2p_stubs.peer.id import ID
-from multiaddr import Multiaddr
 import pytest
+from multiaddr import Multiaddr
 
-from p2pclient.datastructures import PeerInfo, StreamInfo
 import p2pclient.pb.p2pd_pb2 as p2pd_pb
+from p2pclient.datastructures import PeerInfo, StreamInfo
+from p2pclient.libp2p_stubs.peer.id import ID
 
 
 @pytest.fixture(scope="module")

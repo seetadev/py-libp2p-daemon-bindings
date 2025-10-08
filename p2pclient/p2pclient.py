@@ -1,16 +1,20 @@
-from typing import AsyncIterator, Iterable, Sequence, Tuple
+from typing import AsyncIterator, Iterable, Optional, Sequence, Tuple
 
-import anyio
+from anyio.abc import ByteStream
 from async_generator import asynccontextmanager
+from multiaddr import Multiaddr
+
 from p2pclient.libp2p_stubs.crypto.pb import crypto_pb2 as crypto_pb
 from p2pclient.libp2p_stubs.peer.id import ID
-from multiaddr import Multiaddr
 
 from .connmgr import ConnectionManagerClient
 from .control import ControlClient, DaemonConnector, StreamHandler
 from .datastructures import PeerInfo, StreamInfo
 from .dht import DHTClient
 from .pubsub import PubSubClient
+
+# Type alias for compatibility
+SocketStream = ByteStream
 
 
 class Client:
@@ -20,7 +24,9 @@ class Client:
     pubsub: PubSubClient
 
     def __init__(
-        self, control_maddr: Multiaddr = None, listen_maddr: Multiaddr = None
+        self,
+        control_maddr: Optional[Multiaddr] = None,
+        listen_maddr: Optional[Multiaddr] = None,
     ) -> None:
         daemon_connector = DaemonConnector(control_maddr=control_maddr)
         self.control = ControlClient(
@@ -34,9 +40,6 @@ class Client:
     async def listen(self) -> AsyncIterator["Client"]:
         async with self.control.listen():
             yield self
-
-    async def close(self) -> None:
-        await self.control.close()
 
     async def identify(self) -> Tuple[ID, Tuple[Multiaddr, ...]]:
         return await self.control.identify()
@@ -52,7 +55,7 @@ class Client:
 
     async def stream_open(
         self, peer_id: ID, protocols: Sequence[str]
-    ) -> Tuple[StreamInfo, anyio.abc.SocketStream]:
+    ) -> Tuple[StreamInfo, SocketStream]:
         return await self.control.stream_open(peer_id=peer_id, protocols=protocols)
 
     async def stream_handler(self, proto: str, handler_cb: StreamHandler) -> None:
@@ -109,5 +112,5 @@ class Client:
     async def pubsub_publish(self, topic: str, data: bytes) -> None:
         return await self.pubsub.publish(topic=topic, data=data)
 
-    async def pubsub_subscribe(self, topic: str) -> anyio.abc.SocketStream:
+    async def pubsub_subscribe(self, topic: str) -> ByteStream:
         return await self.pubsub.subscribe(topic=topic)
